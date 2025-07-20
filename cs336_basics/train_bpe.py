@@ -2,12 +2,15 @@ import regex as re
 import multiprocessing as mp
 from pretokenization_example import *
 import collections
+import heapq
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 
 vocab = {}
 reverse_vocab = {}
+frequency_map = collections.defaultdict(int)
+merges_map = {}
 for i in range(256):
     vocab[i] = bytes([i])
     reverse_vocab[bytes([i])] = i
@@ -16,36 +19,24 @@ for i in range(256):
 def process_chunk(input_path, special_tokens, start, end, vocab, reverse_vocab):
     pattern = "|".join(map(re.escape, special_tokens))
     frequency = collections.defaultdict(int)
-    # print(reverse_vocab)
     
     with open(input_path, "rb") as f:
         f.seek(start)
         chunks = f.read(end - start).decode("utf-8", errors="ignore") 
         # pre-tokenization
         chunks = re.split(pattern, chunks)
-        freq_words = []
         for chunk in chunks:
-            words = list(map(lambda x: x.group(0),re.finditer(PAT, chunk)))
-            for w1, w2 in zip(words, words[1:]):
-                w = w1+w2
-                temp = []
-                for c in w:
-                    enc_c = c.encode("utf-8")
-                    idx = reverse_vocab[enc_c]
-                    temp.append(idx)
-                key = tuple(temp)
-                frequency[key] += 1
-
-       
-
-            if len(frequency) > 0:
-                most_frequent = max(frequency.items(), key = lambda x: (x[1], x[0]))[0]
-                val = ''.join([vocab[i].decode("utf-8") for i in most_frequent])
-                freq_words.append(val)
-    return freq_words
+            words = list(map(lambda x: x.group(0),re.finditer(PAT.encode('utf-8'), chunk.encode('utf-8'))))
+            for word in words:
+                if len(word) < 2:
+                    continue
+                for pair in zip(word, word[1:]):
+                    frequency[pair] += 1
+    return frequency
                 
 
 def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str]):
+    merges = []
 
     chunk_count = mp.cpu_count()
     print(f"Using {chunk_count} processes for BPE training.")
@@ -61,18 +52,28 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str]):
     with open(input_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, chunk_count, "<|endoftext|>".encode("utf-8"))
 
+    max_count = float('-inf')
+    max_pair = []
     for start, end in zip(boundaries[:-1], boundaries[1:]):
         args = (input_path, special_tokens, start, end, vocab, reverse_vocab)
         with mp.Pool(processes=chunk_count) as pool:
             for res in pool.starmap(process_chunk, [args]):
-                for word in res:
-                    enc_word = word.encode("utf-8")
-                    if enc_word not in reverse_vocab:
-                        idx = len(vocab)
-                        vocab[idx] = enc_word
-                        reverse_vocab[enc_word] = idx
-        print(f"vocab size: {len(vocab)}")
-        print(f"New vocab: {vocab}")
+                for pair, count in res.items():
+                    frequency_map[pair]+=count
+                    if frequency_map[pair] > max_count:
+                        max_count = frequency_map[pair]
+                        max_pair = pair
+    
+    idx = len(vocab)
+    vocab[idx] = bytes(max_pair)
+    
+    merges_map[max_pair] = idx
+    merges.append((vocab[max_pair[0]], vocab[max_pair[1]]))
+    print (merges_map)
+    print(vocab)
+    print(merges)
+    
+
             
 
 
