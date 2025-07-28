@@ -27,10 +27,10 @@ def get_chunk_ids(input_path, start, end, special_tokens):
 
 def count_pairs(doc_id, chunk_ids):
     freq_map = collections.defaultdict(int)
-    pair_locations = collections.defaultdict(list)
+    pair_locations = collections.defaultdict(set)
     for pos_idx, (u,v) in enumerate(zip(chunk_ids[:-1], chunk_ids[1:])):
         freq_map[(u, v)] += 1
-        pair_locations[(u, v)].append((doc_id, pos_idx))
+        pair_locations[(u, v)].add((doc_id, pos_idx))
     return freq_map, pair_locations
 
 
@@ -46,50 +46,66 @@ def apply_merge(chunk_ids, merge_pair, new_idx):
             i+=1
     return out
 
-def update_counts(pair_locations, chunks, merge_pair, new_token):
-    pair_location_list = pair_locations[merge_pair].copy()
-    for cur_doc_idx, pos_idx in pair_location_list:
-        chunk_ids = chunks[cur_doc_idx]
-        preceeding_pos = pos_idx - 1
-        following_pos = pos_idx + 2
-        if preceeding_pos < 0 or following_pos >= len(chunk_ids):
+
+def update_counts(pair_locations, all_doc_ids, merge_pair, new_token, freq_heap):
+    pair_location_list = pair_locations[merge_pair]
+
+    pair_location_list = sorted(pair_location_list, reverse=True)
+
+    for doc_idx, pos_idx in pair_location_list:
+        doc = all_doc_ids[doc_idx]
+        doc_copy = doc[:]
+        if pos_idx < 0 or pos_idx+1>=len(doc):
             continue
-    
-        preceeding_pair = (chunk_ids[preceeding_pos], merge_pair[0]) if preceeding_pos >= 0 else None
-        new_pair_1 = (chunk_ids[preceeding_pos], new_token) if preceeding_pos >= 0 else None
-        following_pair = (merge_pair[1], chunk_ids[following_pos]) if following_pos < len(chunk_ids) else None
-        new_pair_2 = (new_token, chunk_ids[following_pos]) if following_pos < len(chunk_ids) else None
-        # print(f"Updating pairs: {merge_pair} -> {new_pair_1}, {new_pair_2} in doc {cur_doc_idx} at pos {pos_idx}")
-        # print(f"Preceding pair: {preceeding_pair}, Following pair: {following_pair}")
 
-        if preceeding_pair is not None:
-            all_freq_counts[preceeding_pair] -= 1
-            if all_freq_counts[preceeding_pair] <= 0:
-                del all_freq_counts[preceeding_pair]
-            all_freq_counts[new_pair_1] += 1
-            if (cur_doc_idx, preceeding_pos) in pair_locations[preceeding_pair]:
-                pair_locations[preceeding_pair].remove((cur_doc_idx, preceeding_pos))
-            pair_locations[new_pair_1].add((cur_doc_idx, preceeding_pos))
+        if pos_idx > 0:
+            left_pair = (doc[pos_idx-1], doc[pos_idx])
+            all_freq_counts[left_pair]-=1
+            if all_freq_counts[left_pair] <=0:
+                del all_freq_counts[left_pair]
             
-        if following_pair is not None:
-            all_freq_counts[following_pair] -= 1
-            if all_freq_counts[following_pair] <= 0:
-                del all_freq_counts[following_pair]
-            all_freq_counts[new_pair_2] += 1
-            if (cur_doc_idx, following_pos) in pair_locations[following_pair]:
-                pair_locations[following_pair].remove((cur_doc_idx, following_pos))
-            pair_locations[new_pair_2].add((cur_doc_idx, following_pos))
+            pair_locations[left_pair].discard((doc_idx, pos_idx-1))
+            if not pair_locations[left_pair]:
+                pair_locations.pop(left_pair, None)
+        if pos_idx < len(doc)-2:
+            right_pair = (doc[pos_idx+1], doc[pos_idx+2])
+            all_freq_counts[right_pair]-=1
+            if all_freq_counts[right_pair] <=0:
+                del all_freq_counts[right_pair]
+            
+            pair_locations[right_pair].discard((doc_idx, pos_idx+1))
+            if not pair_locations[right_pair]:
+                pair_locations.pop(right_pair, None)
+        
+        doc_copy[pos_idx:pos_idx+2] = [new_token]
+        updated_doc = doc_copy
 
-        # Remove the merge pair from the pair locations
-        all_freq_counts[merge_pair] -= 1
-        if (cur_doc_idx, pos_idx) in pair_locations[merge_pair]:
-            pair_locations[merge_pair].remove((cur_doc_idx, pos_idx))
+        if pos_idx > 0:
+            new_pair_1 = (updated_doc[pos_idx-1], new_token)
+            all_freq_counts[new_pair_1]+=1
+            count = all_freq_counts[new_pair_1]
+            if len(freq_heap) > 0 and count > -freq_heap[0][0]:
+                heapq.heappush(freq_heap, (-count, new_pair_1))
+            else:
+                heapq.heappush(freq_heap, (-count, new_pair_1))
 
-        chunks[cur_doc_idx] = chunk_ids[:pos_idx] + [new_token] + chunk_ids[pos_idx + 2:]
-    del pair_locations[merge_pair]
-    del all_freq_counts[merge_pair]
+            pair_locations[new_pair_1].add((doc_idx, pos_idx-1))
+        if pos_idx < len(updated_doc)-1:
+            new_pair_2 = (new_token, updated_doc[pos_idx+1])
+            all_freq_counts[new_pair_2]+=1
+            count = all_freq_counts[new_pair_2]
+            if len(freq_heap) > 0 and count > -freq_heap[0][0]:
+                heapq.heappush(freq_heap, (-count, new_pair_2))
+            else:
+                heapq.heappush(freq_heap, (-count, new_pair_2))
+            pair_locations[new_pair_2].add((doc_idx, pos_idx))
 
-    return pair_locations, chunks
+        all_doc_ids[doc_idx] = doc_copy
+    
+    pair_locations.pop(merge_pair, None)
+    all_freq_counts.pop(merge_pair, None)
+
+    return pair_locations, all_doc_ids, freq_heap
 
 
 def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str]):
@@ -125,25 +141,43 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str]):
             for k, v in pair_locations_res.items():
                 all_pair_locations[k].update(v)
 
-            
+    
+    freq_count_heap = [(-v, k) for k,v in all_freq_counts.items()]
+    heapq.heapify(freq_count_heap)
 
     while len(vocab) < vocab_size:
-        max_freq_pair = max(all_freq_counts.items(), key=lambda x: x[1])[0]
+        max_freq_pair = None
+        while freq_count_heap:
+            count, pair = heapq.heappop(freq_count_heap)
+            if all_freq_counts[pair] == -count:
+                max_freq_pair = pair
+                break
+        
+        if max_freq_pair is None:
+            break
+
         idx = len(vocab)
         vocab[idx] = vocab[max_freq_pair[0]] + vocab[max_freq_pair[1]]
         merges.append((vocab[max_freq_pair[0]], vocab[max_freq_pair[1]]))
 
-        all_pair_locations, all_doc_ids = update_counts(all_pair_locations, 
+        all_pair_locations, all_doc_ids, freq_count_heap = update_counts(all_pair_locations, 
                                                         all_doc_ids, 
                                                         max_freq_pair, 
-                                                        idx)
+                                                        idx,
+                                                        freq_count_heap)
+        
+        
+        if len(vocab) % 100 == 0:
+            print(f"Merge {len(merges)}: {max_freq_pair} -> {max_freq_pair} | Vocab size: {len(vocab)}")
+        
+       
         
     return vocab, merges
 
 
 if __name__ == "__main__":
-    input_path = "data/TinyStoriesV2-GPT4-valid.txt"
-    vocab_size = 10000
+    input_path = "data/tiny_test.txt"
+    vocab_size = 1000
     special_tokens = ["<|endoftext|>"]
 
     vocab, merges = train_bpe(input_path, vocab_size, special_tokens)
