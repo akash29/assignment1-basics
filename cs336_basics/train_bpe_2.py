@@ -1,6 +1,6 @@
 import regex as re
 import multiprocessing as mp
-from pretokenization_example import *
+from cs336_basics.pretokenization_example import *
 import collections
 import heapq
 
@@ -108,7 +108,7 @@ def update_counts(pair_locations, all_doc_ids, merge_pair, new_token, freq_heap)
     return pair_locations, all_doc_ids, freq_heap
 
 
-def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str]):
+def train_bpe(input_path: str | os.PathLike, vocab_size: int, special_tokens: list[str]):
     cpu_count = mp.cpu_count()
     vocab = {}
     merges = []
@@ -167,8 +167,8 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str]):
                                                         freq_count_heap)
         
         
-        if len(vocab) % 100 == 0:
-            print(f"Merge {len(merges)}: {max_freq_pair} -> {max_freq_pair} | Vocab size: {len(vocab)}")
+        # if len(vocab) % 100 == 0:
+        #     print(f"Merge {len(merges)}: {max_freq_pair}| Vocab size: {len(vocab)}")
         
        
         
@@ -176,7 +176,7 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str]):
 
 
 if __name__ == "__main__":
-    input_path = "data/TinyStoriesV2-GPT4-valid.txt"
+    input_path = "data/tiny_test.txt"
     vocab_size = 10000
     special_tokens = ["<|endoftext|>"]
 
